@@ -8,7 +8,7 @@ use soroban_sdk::{
 pub mod events;
 pub mod test_new_features;
 
-#[contracterror]
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 /// Contract error variants.
@@ -89,8 +89,26 @@ pub enum ContractError {
     WalletBlacklisted = 37,
     SchemaVersionTooOld = 38,
     SchemaVersionUnsupported = 39,
-    NoStakeFound = 40,
-    LockTooLong = 41,
+    DisplayNameEmpty = 40,
+    DeadlinePassed = 41,
+    CapAlreadySet = 42,
+    MultisigAdminLimitExceeded = 43,
+    AlreadyApproved = 44,
+    ProposalNotFound = 45,
+    VestingNotFound = 46,
+    VestingNotStarted = 47,
+    NothingToClaim = 48,
+    NotWhitelisted = 49,
+    CircuitBreakerTriggered = 50,
+    GlobalTradingHalted = 51,
+    StakeMissing = 52,
+    StakeLockLong = 53,
+}
+
+#[allow(non_upper_case_globals)]
+impl ContractError {
+    pub const NoStakeFound: Self = Self::StakeMissing;
+    pub const LockTooLong: Self = Self::StakeLockLong;
 }
 
 pub mod fee {
@@ -2445,7 +2463,8 @@ impl CreatorKeysContract {
 
                 if referral_amount > 0 {
                     let ref_key = constants::storage::referral_earnings(&referrer_addr);
-                    let current_earnings: i128 = env.storage().persistent().get(&ref_key).unwrap_or(0);
+                    let current_earnings: i128 =
+                        env.storage().persistent().get(&ref_key).unwrap_or(0);
                     let new_earnings = current_earnings
                         .checked_add(referral_amount)
                         .ok_or(ContractError::Overflow)?;
@@ -4596,11 +4615,7 @@ impl CreatorKeysContract {
     ///
     /// Only callable by the creator. Panics with `CapAlreadySet` if a cap is
     /// already set and the new cap is lower than the current supply.
-    pub fn set_supply_cap(
-        env: Env,
-        creator: Address,
-        cap: u32,
-    ) -> Result<(), ContractError> {
+    pub fn set_supply_cap(env: Env, creator: Address, cap: u32) -> Result<(), ContractError> {
         creator.require_auth();
 
         let profile = read_registered_creator_profile(&env, &creator)?;
@@ -4675,11 +4690,7 @@ impl CreatorKeysContract {
     ///
     /// Callable by any admin in the multisig list. If this is the first
     /// proposal, it records the proposer and awaits a second approval.
-    pub fn propose_pause(
-        env: Env,
-        creator: Address,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn propose_pause(env: Env, creator: Address, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
 
         let config: MultisigAdmins = env
@@ -4726,11 +4737,7 @@ impl CreatorKeysContract {
     ///
     /// Callable by a second admin. When the approval threshold (2 of 3) is
     /// reached, the pause executes automatically and all proposals are reset.
-    pub fn approve_pause(
-        env: Env,
-        creator: Address,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn approve_pause(env: Env, creator: Address, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
 
         let config: MultisigAdmins = env
@@ -5094,9 +5101,7 @@ impl CreatorKeysContract {
 
         env.events().publish(
             events::whitelist_enabled_topics(&creator),
-            events::WhitelistEnabledEvent {
-                creator,
-            },
+            events::WhitelistEnabledEvent { creator },
         );
 
         Ok(())
@@ -5115,9 +5120,7 @@ impl CreatorKeysContract {
 
         env.events().publish(
             events::whitelist_disabled_topics(&creator),
-            events::WhitelistDisabledEvent {
-                creator,
-            },
+            events::WhitelistDisabledEvent { creator },
         );
 
         Ok(())
@@ -5140,10 +5143,7 @@ impl CreatorKeysContract {
 
         env.events().publish(
             events::address_whitelisted_topics(&creator),
-            events::AddressWhitelistedEvent {
-                creator,
-                address,
-            },
+            events::AddressWhitelistedEvent { creator, address },
         );
 
         Ok(())
@@ -5166,10 +5166,7 @@ impl CreatorKeysContract {
 
         env.events().publish(
             events::address_removed_topics(&creator),
-            events::AddressRemovedEvent {
-                creator,
-                address,
-            },
+            events::AddressRemovedEvent { creator, address },
         );
 
         Ok(())
@@ -5209,10 +5206,7 @@ impl CreatorKeysContract {
             .ok_or(ContractError::Overflow)?;
 
         if current_balance > 0 && new_balance == 0 {
-            profile.holder_count = profile
-                .holder_count
-                .checked_sub(1)
-                .unwrap_or(0);
+            profile.holder_count = profile.holder_count.checked_sub(1).unwrap_or(0);
         }
 
         profile.supply = new_supply;
@@ -5251,7 +5245,10 @@ impl CreatorKeysContract {
     ) -> Option<VestingSchedule> {
         env.storage()
             .persistent()
-            .get(&constants::storage::vesting_schedule(&creator, &beneficiary))
+            .get(&constants::storage::vesting_schedule(
+                &creator,
+                &beneficiary,
+            ))
     }
 
     // =========================================================================
@@ -5276,11 +5273,7 @@ impl CreatorKeysContract {
         const TIMELOCK_DELAY_LEDGERS: u32 = 34_560;
 
         let next_id_key = DataKey::TimelockNextId;
-        let proposal_id: u32 = env
-            .storage()
-            .persistent()
-            .get(&next_id_key)
-            .unwrap_or(1u32);
+        let proposal_id: u32 = env.storage().persistent().get(&next_id_key).unwrap_or(1u32);
 
         let current_ledger = env.ledger().sequence();
         let execution_not_before = current_ledger
@@ -5398,10 +5391,7 @@ impl CreatorKeysContract {
     }
 
     /// Read-only view: returns a timelock proposal by ID.
-    pub fn get_timelock_proposal(
-        env: Env,
-        proposal_id: u32,
-    ) -> Option<TimelockProposal> {
+    pub fn get_timelock_proposal(env: Env, proposal_id: u32) -> Option<TimelockProposal> {
         env.storage()
             .persistent()
             .get(&DataKey::TimelockProposal(proposal_id))
