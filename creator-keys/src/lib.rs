@@ -1,7 +1,9 @@
 #![no_std]
 pub mod quote_view_errors;
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Vec,
+};
 
 pub mod events;
 pub mod test_new_features;
@@ -87,18 +89,8 @@ pub enum ContractError {
     WalletBlacklisted = 37,
     SchemaVersionTooOld = 38,
     SchemaVersionUnsupported = 39,
-    DisplayNameEmpty = 40,
-    DeadlinePassed = 41,
-    CapAlreadySet = 42,
-    MultisigAdminLimitExceeded = 43,
-    AlreadyApproved = 44,
-    ProposalNotFound = 45,
-    VestingNotFound = 46,
-    VestingNotStarted = 47,
-    NothingToClaim = 48,
-    NotWhitelisted = 49,
-    CircuitBreakerTriggered = 50,
-    GlobalTradingHalted = 51,
+    NoStakeFound = 40,
+    LockTooLong = 41,
 }
 
 pub mod fee {
@@ -315,7 +307,7 @@ pub mod constants {
 
     pub mod storage {
         use super::{creator_key, key_balance_key, DataKey};
-        use soroban_sdk::Address;
+        use soroban_sdk::{Address, BytesN};
 
         pub const FEE_CONFIG: DataKey = DataKey::FeeConfig;
         pub const KEY_PRICE: DataKey = DataKey::KeyPrice;
@@ -401,6 +393,10 @@ pub mod constants {
 
         pub fn staked_balance(creator: &Address, holder: &Address) -> DataKey {
             DataKey::StakedBalance(creator.clone(), holder.clone())
+        }
+
+        pub fn staking_position(wallet: &Address, key_id: &BytesN<32>) -> DataKey {
+            DataKey::StakingPosition(wallet.clone(), key_id.clone())
         }
 
         pub fn key_balance(creator: &Address, holder: &Address) -> DataKey {
@@ -598,6 +594,9 @@ pub const KEY_DECIMALS: u32 = 7;
 /// buy or sell operation to prevent active creator state from expiring.
 pub const CREATOR_TTL_LEDGERS: u32 = 6311520; // ~2 years at 5s per ledger
 
+/// Maximum staking lock extension from the current ledger (~180 days at 5 seconds per ledger).
+pub const MAX_STAKE_LOCK_LEDGERS: u32 = 3_110_400;
+
 /// Minimum remaining TTL (in ledgers) that triggers a TTL extension event.
 ///
 /// When the creator key's remaining TTL drops strictly below this threshold,
@@ -769,6 +768,7 @@ pub enum DataKey {
     CoCreatorFeeBalance(Address, Address),
     Whitelist(Address),
     StakedBalance(Address, Address), // (creator, holder) -> staked amount
+    StakingPosition(Address, BytesN<32>), // (wallet, key_id) -> active stake position
     MaxKeysPerWallet(Address),
     ReferralFeeBps,
     DiscountTiers,
@@ -818,6 +818,14 @@ pub struct LockedAllocation {
     pub amount: u32,
     pub unlock_ledger: u32,
     pub claimed: bool,
+}
+
+/// Active wallet stake identified by its key ID.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct StakePosition {
+    pub key_id: BytesN<32>,
+    pub unlock_ledger: u32,
 }
 
 /// Optional immutable collaborator split configured at creator registration.
@@ -4445,6 +4453,57 @@ impl CreatorKeysContract {
             .set(&staked_balance_key, &new_staked);
         extend_key_ttl_to_full_window(&env, &staked_balance_key);
 
+        Ok(())
+    }
+
+    /// Extends the unlock ledger for an active wallet stake.
+    pub fn stake_extend(
+        env: Env,
+        wallet: Address,
+        key_id: BytesN<32>,
+        additional_ledgers: u32,
+    ) -> Result<(), ContractError> {
+        wallet.require_auth();
+
+        let position_key = constants::storage::staking_position(&wallet, &key_id);
+        let mut position: StakePosition = env
+            .storage()
+            .persistent()
+            .get(&position_key)
+            .ok_or(ContractError::NoStakeFound)?;
+        let current_ledger = env.ledger().sequence();
+        if position.unlock_ledger <= current_ledger {
+            return Err(ContractError::NoStakeFound);
+        }
+
+        let new_unlock_ledger = position
+            .unlock_ledger
+            .checked_add(additional_ledgers)
+            .ok_or(ContractError::LockTooLong)?;
+        let maximum_unlock_ledger = current_ledger
+            .checked_add(MAX_STAKE_LOCK_LEDGERS)
+            .ok_or(ContractError::LockTooLong)?;
+        if new_unlock_ledger > maximum_unlock_ledger {
+            return Err(ContractError::LockTooLong);
+        }
+
+        let old_unlock_ledger = position.unlock_ledger;
+        position.unlock_ledger = new_unlock_ledger;
+        env.storage().persistent().set(&position_key, &position);
+        env.storage().persistent().extend_ttl(
+            &position_key,
+            MAX_STAKE_LOCK_LEDGERS,
+            MAX_STAKE_LOCK_LEDGERS,
+        );
+        env.events().publish(
+            events::stake_extended_topics(&wallet, &key_id),
+            events::StakeExtendedEvent {
+                wallet,
+                key_id,
+                old_unlock_ledger,
+                new_unlock_ledger,
+            },
+        );
         Ok(())
     }
 

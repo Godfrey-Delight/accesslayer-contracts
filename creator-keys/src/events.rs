@@ -456,6 +456,25 @@ pub const TREASURY_WITHDRAWAL_EVENT_NAME: Symbol = symbol_short!("treas_out");
 /// Event name for creator storage TTL extension.
 pub const TTL_EXTENDED_EVENT_NAME: Symbol = symbol_short!("ttl_ext");
 
+/// Event name for extending an active wallet stake.
+pub const STAKE_EXTENDED_EVENT_NAME: Symbol = symbol_short!("stake_ext");
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct StakeExtendedEvent {
+    pub wallet: Address,
+    pub key_id: soroban_sdk::BytesN<32>,
+    pub old_unlock_ledger: u32,
+    pub new_unlock_ledger: u32,
+}
+
+pub fn stake_extended_topics(
+    wallet: &Address,
+    key_id: &soroban_sdk::BytesN<32>,
+) -> (Symbol, Address, soroban_sdk::BytesN<32>) {
+    (STAKE_EXTENDED_EVENT_NAME, wallet.clone(), key_id.clone())
+}
+
 /// Stable field order for treasury withdrawal event payloads.
 pub const TREASURY_WITHDRAWAL_DATA_FIELDS: [&str; 4] =
     ["amount", "recipient", "remaining_balance", "ledger"];
@@ -486,8 +505,6 @@ pub fn treasury_withdrawal_event_topics(recipient: &Address) -> (Symbol, Address
 pub fn ttl_extended_topics(creator: &Address) -> (Symbol, Address) {
     (TTL_EXTENDED_EVENT_NAME, creator.clone())
 }
-
-
 // --- Supply cap events ---
 
 /// Event name for supply cap set.
