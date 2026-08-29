@@ -3,7 +3,7 @@
 pub mod quote_view_errors;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec,
 };
 
 pub mod events;
@@ -79,6 +79,9 @@ pub enum ContractError {
     MaxHoldingExceeded = 51,
     LockupPeriodActive = 52,
     InvalidHolderCap = 53,
+    GlobalTradingHalted = 54,
+    FrozenBalanceExceeded = 55,
+    FreezeQuantityExceedsBalance = 56,
 }
 
 /// Errors raised by the staking lifecycle entrypoints
@@ -107,9 +110,6 @@ pub enum StakingError {
     NotRegistered = 7,
     /// The contract is paused.
     ProtocolPaused = 8,
-    GlobalTradingHalted = 51,
-    FrozenBalanceExceeded = 52,
-    FreezeQuantityExceedsBalance = 53,
 }
 
 #[contracterror]
@@ -458,12 +458,24 @@ pub mod constants {
             DataKey::StakingRewardsPool(creator.clone())
         }
 
+        pub fn total_staked(creator: &Address) -> DataKey {
+            DataKey::TotalStaked(creator.clone())
+        }
+
+        pub fn stake_unlock_ledger(creator: &Address, holder: &Address) -> DataKey {
+            DataKey::StakeUnlockLedger(creator.clone(), holder.clone())
+        }
+
         pub fn created_at_ledger(creator: &Address) -> DataKey {
             DataKey::CreatedAtLedger(creator.clone())
         }
 
         pub fn launch_penalty_bps(creator: &Address) -> DataKey {
             DataKey::LaunchPenaltyBps(creator.clone())
+        }
+
+        pub fn auction_config(creator: &Address) -> DataKey {
+            DataKey::AuctionConfig(creator.clone())
         }
 
         pub fn next_stake_id(creator: &Address, holder: &Address) -> StakingKey {
@@ -536,14 +548,6 @@ pub mod constants {
 
         pub fn vesting_claimed(creator: &Address, beneficiary: &Address) -> DataKey {
             DataKey::VestingClaimed(creator.clone(), beneficiary.clone())
-        }
-
-        pub fn holder_cap_bps(creator: &Address) -> DataKey {
-            DataKey::HolderCapBps(creator.clone())
-        }
-
-        pub fn last_buy_timestamp(creator: &Address, holder: &Address) -> DataKey {
-            DataKey::LastBuyTimestamp(creator.clone(), holder.clone())
         }
 
         pub fn quorum_bps(creator: &Address) -> DataKey {
@@ -888,7 +892,6 @@ pub enum DataKey {
     CoCreatorFeeBalance(Address, Address),
     Whitelist(Address),
     StakedBalance(Address, Address), // (creator, holder) -> staked amount
-    StakingPosition(Address, BytesN<32>), // (wallet, key_id) -> active stake position
     MaxKeysPerWallet(Address),
     ReferralFeeBps,
     DiscountTiers,
@@ -921,14 +924,47 @@ pub enum DataKey {
     HolderCapBps(Address),
     LastBuyTimestamp(Address, Address),
     LockupDurationSecs,
-    RoyaltyConfig(Address),
-    CurveExponent(Address),
+    /// Per-creator staking position. Keyed `(creator, holder, stake_id)`.
+    StakePosition(Address, Address, u32),
+    /// Per-creator staking rewards pool and cross-holder staked-key total,
+    /// funded by a share of protocol trade fees.
+    StakingRewardsPool(Address),
+    /// Total keys staked across all holders for a creator.
+    TotalStaked(Address),
+    /// Ledger sequence when a holder's stake unlocks.
+    StakeUnlockLedger(Address, Address),
+    /// Ledger sequence when the first key was bought for a creator (launch date).
+    CreatedAtLedger(Address),
+    /// Custom launch penalty basis points for a creator (0 = use default).
+    LaunchPenaltyBps(Address),
+    /// Configuration for a creator's fixed-price pre-launch auction phase.
+    AuctionConfig(Address),
     QuorumBps(Address),
     GlobalTradingPaused,
     GlobalPauseAdmins,
     GlobalPauseVote(Address),
     GlobalResumeVote(Address),
     SelfFrozenBalance(Address, Address),
+}
+
+/// Internal staking account keys that are not part of the public data-key ABI.
+///
+/// Used to keep [`DataKey`] within Soroban's 50-variant `#[contracttype]` cap;
+/// `NextStakeId` is keyed per `(creator, holder)` pair.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum StakingKey {
+    /// Next sequential stake id for a `(creator, holder)` pair -> `u32`.
+    NextStakeId(Address, Address),
+}
+
+/// Configuration for a creator's fixed-price pre-launch auction phase.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct AuctionConfig {
+    pub auction_price: i128,
+    pub auction_supply: u32,
+    pub auction_sold: u32,
 }
 
 /// Time-locked key allocation for creator self-vesting.
@@ -943,12 +979,52 @@ pub struct LockedAllocation {
     pub claimed: bool,
 }
 
-/// Active wallet stake identified by its key ID.
+/// Active position in the creator's staking rewards pool.
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub struct StakePosition {
-    pub key_id: BytesN<32>,
+    /// Sequential id scoped to the `(creator, holder)` pair.
+    pub stake_id: u32,
+    /// Number of keys locked in this position.
+    pub amount: u32,
+    /// Ledger sequence at which the position matures and can be claimed.
     pub unlock_ledger: u32,
+}
+
+/// Per-creator staking rewards accounting.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct StakingRewardsState {
+    /// Accumulated reward pool, funded from a share of protocol trade fees.
+    pub pool: i128,
+    /// Total keys currently staked for the creator across all holders.
+    pub total_staked: u32,
+}
+
+/// Result of [`CreatorKeysContract::early_unstake`].
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct StakeExit {
+    /// Id of the closed position.
+    pub stake_id: u32,
+    /// Keys released back to the holder's liquid balance.
+    pub amount: u32,
+    /// Pro-rata reward entitlement removed from the pool.
+    pub forgone_reward: i128,
+    /// Penalty retained in the pool (added back after the forgone reward is removed).
+    pub penalty: i128,
+}
+
+/// Result of [`CreatorKeysContract::claim_stake_reward`].
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct StakeRewardClaim {
+    /// Id of the closed position.
+    pub stake_id: u32,
+    /// Keys released back to the holder's liquid balance.
+    pub amount: u32,
+    /// Reward paid out to the staker from the pool.
+    pub reward: i128,
 }
 
 /// Optional immutable collaborator split configured at creator registration.
@@ -1790,47 +1866,12 @@ fn read_lockup_duration_secs(env: &Env) -> Option<u64> {
         .get(&constants::storage::LOCKUP_DURATION_SECS)
 }
 
-/// Reads the accumulated staking rewards pool balance for a creator, returning `0` when none is stored.
-pub fn read_staking_rewards_pool(env: &Env, creator: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&constants::storage::staking_rewards_pool(creator))
-        .unwrap_or(0)
-}
-
 /// Reads the total keys currently staked across all holders for a creator.
 pub fn read_total_staked(env: &Env, creator: &Address) -> u32 {
     env.storage()
         .persistent()
         .get(&constants::storage::total_staked(creator))
         .unwrap_or(0)
-}
-
-/// Routes a share of a protocol fee collection into the creator's staking rewards pool.
-///
-/// This is additive bookkeeping on top of the existing treasury/protocol-fee-recipient
-/// split — it does not reduce what those balances receive, so existing fee-accounting
-/// invariants are unaffected. [`CreatorKeysContract::claim_stake_reward`] pays stakers
-/// out of this dedicated pool.
-fn credit_staking_rewards_pool(
-    env: &Env,
-    creator: &Address,
-    protocol_fee: i128,
-) -> Result<(), ContractError> {
-    if protocol_fee <= 0 {
-        return Ok(());
-    }
-    let share = fee::apply_percentage_fee(protocol_fee, STAKING_REWARD_SHARE_BPS)
-        .ok_or(ContractError::Overflow)?;
-    if share <= 0 {
-        return Ok(());
-    }
-    let key = constants::storage::staking_rewards_pool(creator);
-    let updated = read_staking_rewards_pool(env, creator)
-        .checked_add(share)
-        .ok_or(ContractError::Overflow)?;
-    env.storage().persistent().set(&key, &updated);
-    Ok(())
 }
 
 /// Archive retention configuration module with canonical defaults.
@@ -2608,25 +2649,32 @@ impl CreatorKeysContract {
                 .ok_or(ContractError::Overflow)?;
             let post_price = compute_bonding_curve_price(&env, &creator, base_price, post_supply)?;
 
-        if pre_price > 0 && post_price > pre_price {
-            let price_change = (post_price - pre_price) as u128;
-            let pre_price_u128 = pre_price as u128;
-            let threshold_pct_u128 = threshold_pct as u128;
-            if price_change
-                .checked_mul(100)
-                .ok_or(ContractError::Overflow)?
-                >= pre_price_u128
-                    .checked_mul(threshold_pct_u128)
+            let threshold_pct: u32 = env
+                .storage()
+                .persistent()
+                .get(&constants::storage::CIRCUIT_BREAKER_THRESHOLD)
+                .unwrap_or(30);
+
+            if pre_price > 0 && post_price > pre_price {
+                let price_change = (post_price - pre_price) as u128;
+                let pre_price_u128 = pre_price as u128;
+                let threshold_pct_u128 = threshold_pct as u128;
+                if price_change
+                    .checked_mul(100)
                     .ok_or(ContractError::Overflow)?
-            {
-                env.events().publish(
-                    (events::circuit_breaker_triggered_topics(),),
-                    events::CircuitBreakerTriggeredEvent {
-                        pre_price,
-                        post_price,
-                    },
-                );
-                return Err(ContractError::CircuitBreakerTriggered);
+                    >= pre_price_u128
+                        .checked_mul(threshold_pct_u128)
+                        .ok_or(ContractError::Overflow)?
+                {
+                    env.events().publish(
+                        (events::circuit_breaker_triggered_topics(),),
+                        events::CircuitBreakerTriggeredEvent {
+                            pre_price,
+                            post_price,
+                        },
+                    );
+                    return Err(ContractError::CircuitBreakerTriggered);
+                }
             }
 
             pre_price
@@ -4970,56 +5018,6 @@ impl CreatorKeysContract {
         Ok(())
     }
 
-    /// Extends the unlock ledger for an active wallet stake.
-    pub fn stake_extend(
-        env: Env,
-        wallet: Address,
-        key_id: BytesN<32>,
-        additional_ledgers: u32,
-    ) -> Result<(), ContractError> {
-        wallet.require_auth();
-
-        let position_key = constants::storage::staking_position(&wallet, &key_id);
-        let mut position: StakePosition = env
-            .storage()
-            .persistent()
-            .get(&position_key)
-            .ok_or(ContractError::NoStakeFound)?;
-        let current_ledger = env.ledger().sequence();
-        if position.unlock_ledger <= current_ledger {
-            return Err(ContractError::NoStakeFound);
-        }
-
-        let new_unlock_ledger = position
-            .unlock_ledger
-            .checked_add(additional_ledgers)
-            .ok_or(ContractError::LockTooLong)?;
-        let maximum_unlock_ledger = current_ledger
-            .checked_add(MAX_STAKE_LOCK_LEDGERS)
-            .ok_or(ContractError::LockTooLong)?;
-        if new_unlock_ledger > maximum_unlock_ledger {
-            return Err(ContractError::LockTooLong);
-        }
-
-        let old_unlock_ledger = position.unlock_ledger;
-        position.unlock_ledger = new_unlock_ledger;
-        env.storage().persistent().set(&position_key, &position);
-        env.storage().persistent().extend_ttl(
-            &position_key,
-            MAX_STAKE_LOCK_LEDGERS,
-            MAX_STAKE_LOCK_LEDGERS,
-        );
-        env.events().publish(
-            events::stake_extended_topics(&wallet, &key_id),
-            events::StakeExtendedEvent {
-                wallet,
-                key_id,
-                old_unlock_ledger,
-                new_unlock_ledger,
-            },
-        );
-        Ok(())
-    }
 
     /// Unstakes a specified amount of keys for a holder.
     ///
