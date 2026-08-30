@@ -2,9 +2,7 @@
 #![allow(clippy::enum_variant_names)] // `contracttype` macro-generated enums share prefixes by design
 pub mod quote_view_errors;
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec};
 
 pub mod events;
 pub mod test_new_features;
@@ -1298,7 +1296,9 @@ fn available_holder_balance(env: &Env, key_id: &Address, wallet: &Address) -> u3
         .persistent()
         .get(&constants::storage::staked_balance(key_id, wallet))
         .unwrap_or(0u32);
-    total.saturating_sub(staked).saturating_sub(read_self_frozen_balance(env, key_id, wallet))
+    total
+        .saturating_sub(staked)
+        .saturating_sub(read_self_frozen_balance(env, key_id, wallet))
 }
 
 /// Reads a creator's current key supply from persistent storage.
@@ -1807,14 +1807,14 @@ fn credit_staking_rewards_pool(
         return Ok(());
     }
     let pool_key = constants::storage::staking_rewards_pool(creator);
-    let mut state: StakingRewardsState = env
-        .storage()
-        .persistent()
-        .get(&pool_key)
-        .unwrap_or(StakingRewardsState {
-            pool: 0,
-            total_staked: 0,
-        });
+    let mut state: StakingRewardsState =
+        env.storage()
+            .persistent()
+            .get(&pool_key)
+            .unwrap_or(StakingRewardsState {
+                pool: 0,
+                total_staked: 0,
+            });
     state.pool = state
         .pool
         .checked_add(share)
@@ -1850,7 +1850,9 @@ fn sub_staked_balance(env: &Env, creator: &Address, holder: &Address, amount: u3
         if new_staked == 0 {
             env.storage().persistent().remove(&staked_balance_key);
         } else {
-            env.storage().persistent().set(&staked_balance_key, &new_staked);
+            env.storage()
+                .persistent()
+                .set(&staked_balance_key, &new_staked);
             extend_key_ttl_to_full_window(env, &staked_balance_key);
         }
     }
@@ -2932,9 +2934,7 @@ impl CreatorKeysContract {
             .unwrap_or(0);
         let liquid_balance = current_balance
             .saturating_sub(staked_balance)
-            .saturating_sub(read_self_frozen_balance(
-            &env, &creator, &seller,
-        ));
+            .saturating_sub(read_self_frozen_balance(&env, &creator, &seller));
 
         if liquid_balance == 0 {
             return Err(ContractError::InsufficientBalance);
@@ -3034,9 +3034,7 @@ impl CreatorKeysContract {
             .get::<DataKey, u32>(&constants::storage::created_at_ledger(&creator))
         {
             let current_ledger = env.ledger().sequence();
-            if current_ledger
-                .checked_sub(created_at)
-                .unwrap_or(u32::MAX)
+            if current_ledger.checked_sub(created_at).unwrap_or(u32::MAX)
                 < crate::LAUNCH_PENALTY_WINDOW_LEDGERS
             {
                 let penalty_bps: u32 = env
@@ -3047,8 +3045,7 @@ impl CreatorKeysContract {
                 let capped_bps = penalty_bps.min(crate::MAX_LAUNCH_PENALTY_BPS);
                 if capped_bps > 0 {
                     let penalty_amount =
-                        crate::fee::apply_percentage_fee(proceeds, capped_bps)
-                            .unwrap_or(0);
+                        crate::fee::apply_percentage_fee(proceeds, capped_bps).unwrap_or(0);
                     if penalty_amount > 0 {
                         final_proceeds = final_proceeds
                             .checked_sub(penalty_amount)
@@ -3478,13 +3475,25 @@ impl CreatorKeysContract {
         if available < quantity {
             return Err(ContractError::FreezeQuantityExceedsBalance);
         }
-        let key = constants::storage::self_frozen_balance(&key_id, &wallet);
         let frozen = read_self_frozen_balance(&env, &key_id, &wallet);
-        env.storage().persistent().set(&key, &frozen.checked_add(quantity).ok_or(ContractError::Overflow)?);
+        env.storage().persistent().set(
+            &key,
+            &frozen
+                .checked_add(quantity)
+                .ok_or(ContractError::Overflow)?,
+        );
         extend_key_ttl_to_full_window(&env, &key);
         env.events().publish(
-            (events::SELF_FREEZE_APPLIED_EVENT_NAME, key_id.clone(), wallet.clone()),
-            events::SelfFreezeEvent { key_id, wallet, quantity },
+            (
+                events::SELF_FREEZE_APPLIED_EVENT_NAME,
+                key_id.clone(),
+                wallet.clone(),
+            ),
+            events::SelfFreezeEvent {
+                key_id,
+                wallet,
+                quantity,
+            },
         );
         Ok(())
     }
@@ -3513,8 +3522,16 @@ impl CreatorKeysContract {
             extend_key_ttl_to_full_window(&env, &key);
         }
         env.events().publish(
-            (events::SELF_FREEZE_LIFTED_EVENT_NAME, key_id.clone(), wallet.clone()),
-            events::SelfFreezeEvent { key_id, wallet, quantity },
+            (
+                events::SELF_FREEZE_LIFTED_EVENT_NAME,
+                key_id.clone(),
+                wallet.clone(),
+            ),
+            events::SelfFreezeEvent {
+                key_id,
+                wallet,
+                quantity,
+            },
         );
         Ok(())
     }
@@ -5018,7 +5035,6 @@ impl CreatorKeysContract {
         Ok(())
     }
 
-
     /// Unstakes a specified amount of keys for a holder.
     ///
     /// Unstaked keys become liquid and can be sold. The holder must authorize the call.
@@ -5120,11 +5136,7 @@ impl CreatorKeysContract {
     /// Returns the next sequential stake id for a `(creator, holder)` pair.
     fn next_stake_id(env: &Env, creator: &Address, holder: &Address) -> Result<u32, StakingError> {
         let id_key = constants::storage::next_stake_id(creator, holder);
-        let next: u32 = env
-            .storage()
-            .persistent()
-            .get(&id_key)
-            .unwrap_or(0);
+        let next: u32 = env.storage().persistent().get(&id_key).unwrap_or(0);
         let new_next = next.checked_add(1).ok_or(StakingError::Overflow)?;
         env.storage().persistent().set(&id_key, &new_next);
         env.storage()
@@ -5165,7 +5177,8 @@ impl CreatorKeysContract {
 
         let balance_key = constants::storage::key_balance(&creator, &holder);
         let current_balance: u32 = env.storage().persistent().get(&balance_key).unwrap_or(0);
-        let current_staked: u32 = Self::get_staked_balance(env.clone(), creator.clone(), holder.clone());
+        let current_staked: u32 =
+            Self::get_staked_balance(env.clone(), creator.clone(), holder.clone());
         let liquid_balance = current_balance.saturating_sub(current_staked);
         if liquid_balance < amount {
             return Err(StakingError::InsufficientBalance);
@@ -5200,14 +5213,14 @@ impl CreatorKeysContract {
 
         // Track the cross-holder staked total for reward distribution.
         let pool_key = constants::storage::staking_rewards_pool(&creator);
-        let mut state: StakingRewardsState = env
-            .storage()
-            .persistent()
-            .get(&pool_key)
-            .unwrap_or(StakingRewardsState {
-                pool: 0,
-                total_staked: 0,
-            });
+        let mut state: StakingRewardsState =
+            env.storage()
+                .persistent()
+                .get(&pool_key)
+                .unwrap_or(StakingRewardsState {
+                    pool: 0,
+                    total_staked: 0,
+                });
         state.total_staked = state
             .total_staked
             .checked_add(amount)
@@ -5305,14 +5318,14 @@ impl CreatorKeysContract {
         }
 
         let pool_key = constants::storage::staking_rewards_pool(&creator);
-        let mut state: StakingRewardsState = env
-            .storage()
-            .persistent()
-            .get(&pool_key)
-            .unwrap_or(StakingRewardsState {
-                pool: 0,
-                total_staked: 0,
-            });
+        let mut state: StakingRewardsState =
+            env.storage()
+                .persistent()
+                .get(&pool_key)
+                .unwrap_or(StakingRewardsState {
+                    pool: 0,
+                    total_staked: 0,
+                });
 
         // Pro-rata share of the current pool this position would have earned at
         // maturity. Guard division by zero.
@@ -5321,11 +5334,9 @@ impl CreatorKeysContract {
         } else {
             0
         };
-        let penalty = fee::apply_percentage_fee(
-            reward_share,
-            crate::staking::EARLY_UNSTAKE_PENALTY_BPS,
-        )
-        .ok_or(StakingError::Overflow)?;
+        let penalty =
+            fee::apply_percentage_fee(reward_share, crate::staking::EARLY_UNSTAKE_PENALTY_BPS)
+                .ok_or(StakingError::Overflow)?;
 
         // Remove the entitlement, then retain the penalty on behalf of the
         // remaining stakers: pool' = pool - entitlement + penalty.
@@ -5398,14 +5409,14 @@ impl CreatorKeysContract {
         }
 
         let pool_key = constants::storage::staking_rewards_pool(&creator);
-        let mut state: StakingRewardsState = env
-            .storage()
-            .persistent()
-            .get(&pool_key)
-            .unwrap_or(StakingRewardsState {
-                pool: 0,
-                total_staked: 0,
-            });
+        let mut state: StakingRewardsState =
+            env.storage()
+                .persistent()
+                .get(&pool_key)
+                .unwrap_or(StakingRewardsState {
+                    pool: 0,
+                    total_staked: 0,
+                });
 
         let reward = if state.total_staked > 0 {
             (i128::from(position.amount) * state.pool) / i128::from(state.total_staked)
@@ -5462,7 +5473,9 @@ impl CreatorKeysContract {
     ) -> Option<StakePosition> {
         env.storage()
             .persistent()
-            .get(&constants::storage::staking_position(&creator, &holder, stake_id))
+            .get(&constants::storage::staking_position(
+                &creator, &holder, stake_id,
+            ))
     }
 
     /// Read-only view: returns the current staking rewards pool for `creator`.
