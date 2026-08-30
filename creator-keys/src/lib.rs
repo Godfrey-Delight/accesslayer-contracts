@@ -132,6 +132,7 @@ pub enum FeatureError {
     InvalidAuctionConfig = 9,
     StakeLockActive = 10,
     NoStakeFound = 11,
+    CreatorNotFound = 12,
 }
 
 pub mod fee {
@@ -3754,6 +3755,48 @@ impl CreatorKeysContract {
     pub fn get_creator_fee_balance(env: Env, creator: Address) -> Result<i128, ContractError> {
         read_registered_creator_profile(&env, &creator)?;
         Ok(read_creator_fee_recipient_balance(&env, &creator))
+    }
+
+    /// Removes the configured co-creator for `creator`.
+    ///
+    /// Only the key creator can call this (`caller` must match `creator`).
+    /// Once removed, future key purchases will direct 100% of the creator fee
+    /// to the creator, leaving previously accrued co-creator balances intact.
+    ///
+    /// # Errors
+    ///
+    /// - [`FeatureError::Unauthorized`] if `caller` is not `creator`
+    /// - [`FeatureError::NoCoCreatorSet`] if no co-creator is currently configured
+    pub fn remove_co_creator(
+        env: Env,
+        creator: Address,
+        caller: Address,
+    ) -> Result<(), FeatureError> {
+        caller.require_auth();
+
+        if caller != creator {
+            return Err(FeatureError::Unauthorized);
+        }
+
+        let co_creator_key = constants::storage::co_creator(&creator);
+        let config: CoCreatorConfig = env
+            .storage()
+            .persistent()
+            .get(&co_creator_key)
+            .ok_or(FeatureError::NoCoCreatorSet)?;
+
+        env.storage().persistent().remove(&co_creator_key);
+
+        env.events().publish(
+            events::co_creator_removed_topics(&creator),
+            events::CoCreatorRemovedEvent {
+                creator_id: creator,
+                co_creator: config.address,
+                ledger: env.ledger().sequence(),
+            },
+        );
+
+        Ok(())
     }
 
     /// Read-only view: returns the optional immutable co-creator config.
