@@ -833,7 +833,6 @@ pub const MAX_BATCH_BUY_SIZE: usize = 5;
 /// Maximum royalty fee basis points (5%).
 pub const MAX_ROYALTY_BPS: u32 = 500;
 
-
 /// Lock duration for staked keys before a reward claim is permitted (30 days
 /// at 5s per ledger).
 pub const STAKE_LOCK_LEDGERS: u32 = 518_400;
@@ -4077,11 +4076,7 @@ impl CreatorKeysContract {
     /// - [`FeatureError::Unauthorized`] if `caller` is not `creator`
     /// - [`FeatureError::NoAuctionConfigured`] if no auction config exists for `creator`
     /// - [`FeatureError::AuctionAlreadyStarted`] if `auction_sold` is greater than zero
-    pub fn cancel_auction(
-        env: Env,
-        creator: Address,
-        caller: Address,
-    ) -> Result<(), FeatureError> {
+    pub fn cancel_auction(env: Env, creator: Address, caller: Address) -> Result<(), FeatureError> {
         caller.require_auth();
         if caller != creator {
             return Err(FeatureError::Unauthorized);
